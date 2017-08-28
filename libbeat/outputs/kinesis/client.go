@@ -55,7 +55,6 @@ func (c *client) putRecord(data []byte) error {
 	return err
 }
 
-// 批量发送消息时候，发现消息会乱,大概问题在 拼接 records 时候,传入 这个方法后才乱
 func (c *client) putRecords(records []*kinesis.PutRecordsRequestEntry) error {
 	if len(records) == 0 {
 		return nil
@@ -86,7 +85,6 @@ func (c *client) Close() error {
 	return nil
 }
 
-// 批量发送版本
 func (c *client) Publish(batch publisher.Batch) error {
 	defer batch.ACK()
 
@@ -103,7 +101,7 @@ func (c *client) Publish(batch publisher.Batch) error {
 			dropped++
 		}
 	}
-	
+
 	err := c.putRecords(records)
 	if err == nil {
 		c.stats.Acked(len(events) - dropped)
