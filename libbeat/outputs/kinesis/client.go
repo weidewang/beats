@@ -22,6 +22,8 @@ type client struct {
 	partitionKey string
 }
 
+type Records []*kinesis.PutRecordsRequestEntry
+
 func newClient(stats *outputs.Stats, index string, codec codec.Codec, cfg *Config) *client {
 	ci := &client{
 		stats:        stats,
@@ -53,7 +55,7 @@ func (c *client) putRecord(data []byte) error {
 	return err
 }
 
-// 批量发送消息时候，发现消息会乱,大概问题在 拼接 records 时候, TODO 改  channel 试试
+// 批量发送消息时候，发现消息会乱,大概问题在 拼接 records 时候,传入 这个方法后才乱
 func (c *client) putRecords(records []*kinesis.PutRecordsRequestEntry) error {
 	if len(records) == 0 {
 		return nil
@@ -84,6 +86,7 @@ func (c *client) Close() error {
 	return nil
 }
 
+// 批量发送版本
 func (c *client) Publish(batch publisher.Batch) error {
 	defer batch.ACK()
 
@@ -91,32 +94,44 @@ func (c *client) Publish(batch publisher.Batch) error {
 	c.stats.NewBatch(len(events))
 
 	dropped := 0
-	okEventCount := 0
+	var records Records
 	for i := range events {
 		event := &events[i]
-		serializedEvent, err := c.codec.Encode(c.beat.Beat, &event.Content)
-		if err != nil {
-			if event.Guaranteed() {
-				logp.Critical("Failed to serialize the event: %v", err)
-			} else {
-				logp.Warn("Failed to serialize the event: %v", err)
-			}
-			dropped++
-			continue
-		}
-
-		if err := c.putRecord(serializedEvent); err != nil {
-			logp.Err("put record error: %v", err.Error())
-			dropped++
-			continue
+		if record, err := c.makeRecord(event); err == nil {
+			records = append(records, record)
 		} else {
-			okEventCount++
+			dropped++
 		}
 	}
+	
+	err := c.putRecords(records)
+	if err == nil {
+		c.stats.Acked(len(events) - dropped)
+	} else {
+		c.stats.Failed(len(events))
+	}
+
+	records = records[:0]
 
 	c.stats.Dropped(dropped)
-	c.stats.Acked(okEventCount)
-	c.stats.Failed(okEventCount - dropped)
+	return err
+}
 
-	return nil
+func (c *client) makeRecord(event *publisher.Event) (*kinesis.PutRecordsRequestEntry, error) {
+	serializedEvent, err := c.codec.Encode(c.beat.Beat, &event.Content)
+	if err != nil {
+		if event.Guaranteed() {
+			logp.Critical("Failed to serialize the event: %v", err)
+		} else {
+			logp.Warn("Failed to serialize the event: %v", err)
+		}
+		return nil, err
+	}
+
+	buf := make([]byte, len(serializedEvent))
+	copy(buf, serializedEvent)
+	return &kinesis.PutRecordsRequestEntry{
+		Data:         buf,
+		PartitionKey: aws.String(c.partitionKey),
+	}, nil
 }
