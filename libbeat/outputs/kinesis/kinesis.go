@@ -33,8 +33,8 @@ func makeKinesis(
 	}
 
 	bulkMaxSize := config.BulkMaxSize
-	if bulkMaxSize > 50 || bulkMaxSize < 0 {
-		bulkMaxSize = 50
+	if bulkMaxSize > 100 || bulkMaxSize < 0 {
+		bulkMaxSize = 100
 	}
 
 	client := newClient(stats, beat.Beat, codec, config)

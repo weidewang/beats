@@ -1,8 +1,6 @@
 package kinesis
 
 import (
-	"fmt"
-
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/kinesis"
@@ -43,14 +41,24 @@ func newClient(stats *outputs.Stats, index string, codec codec.Codec, cfg *Confi
 	return ci
 }
 
+func (c *client) putRecord(data []byte) error {
+	if len(data) == 0 {
+		return nil
+	}
+	_, err := c.PutRecord(&kinesis.PutRecordInput{
+		StreamName:   aws.String(c.streanName),
+		PartitionKey: aws.String(c.partitionKey),
+		Data:         data,
+	})
+	return err
+}
+
+// 批量发送消息时候，发现消息会乱,大概问题在 拼接 records 时候, TODO 改  channel 试试
 func (c *client) putRecords(records []*kinesis.PutRecordsRequestEntry) error {
 	if len(records) == 0 {
 		return nil
 	}
 
-	for idx, r := range records {
-		r.PartitionKey = aws.String(fmt.Sprintf("%s-%d", c.partitionKey, idx%200))
-	}
 	out, err := c.PutRecords(&kinesis.PutRecordsInput{
 		StreamName: aws.String(c.streanName),
 		Records:    records,
@@ -72,25 +80,21 @@ func (c *client) putRecords(records []*kinesis.PutRecordsRequestEntry) error {
 	return nil
 }
 
-func (c *client) makeRecord(event *publisher.Event) (*kinesis.PutRecordsRequestEntry, error) {
-	serializedEvent, err := c.codec.Encode(c.beat.Beat, &event.Content)
-	if err != nil {
-		return nil, err
-	}
-	return &kinesis.PutRecordsRequestEntry{
-		Data: serializedEvent,
-	}, nil
+func (c *client) Close() error {
+	return nil
 }
 
 func (c *client) Publish(batch publisher.Batch) error {
+	defer batch.ACK()
+
 	events := batch.Events()
 	c.stats.NewBatch(len(events))
 
-	var records []*kinesis.PutRecordsRequestEntry
 	dropped := 0
+	okEventCount := 0
 	for i := range events {
 		event := &events[i]
-		record, err := c.makeRecord(event)
+		serializedEvent, err := c.codec.Encode(c.beat.Beat, &event.Content)
 		if err != nil {
 			if event.Guaranteed() {
 				logp.Critical("Failed to serialize the event: %v", err)
@@ -100,24 +104,19 @@ func (c *client) Publish(batch publisher.Batch) error {
 			dropped++
 			continue
 		}
-		records = append(records, record)
+
+		if err := c.putRecord(serializedEvent); err != nil {
+			logp.Err("put record error: %v", err.Error())
+			dropped++
+			continue
+		} else {
+			okEventCount++
+		}
 	}
 
-	eventCount := len(records)
-	err := c.putRecords(records)
+	c.stats.Dropped(dropped)
+	c.stats.Acked(okEventCount)
+	c.stats.Failed(okEventCount - dropped)
 
-	if err == nil {
-		batch.ACK()
-		c.stats.Acked(eventCount)
-		c.stats.Dropped(dropped)
-	} else {
-		logp.Err("send event faild: %d - errors: %v", eventCount, err.Error())
-		c.stats.Failed(eventCount)
-	}
-
-	return err
-}
-
-func (c *client) Close() error {
 	return nil
 }
