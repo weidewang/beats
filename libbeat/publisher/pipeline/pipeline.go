@@ -111,7 +111,7 @@ type pipelineEventer struct {
 	mutex      sync.Mutex
 	modifyable bool
 
-	observer  *observer
+	observer  queueObserver
 	waitClose *waitCloser
 	cb        *pipelineEventCB
 }
@@ -157,6 +157,7 @@ func New(
 	log := defaultLogger
 	p := &Pipeline{
 		logger:           log,
+		observer:         nilObserver,
 		waitCloseMode:    settings.WaitCloseMode,
 		waitCloseTimeout: settings.WaitClose,
 		processors: pipelineProcessors{
@@ -169,7 +170,10 @@ func New(
 	p.ackBuilder = &pipelineEmptyACK{p}
 	p.ackActive = atomic.MakeBool(true)
 
-	p.eventer.observer = &p.observer
+	if metrics != nil {
+		p.observer = newMetricsObserver(metrics)
+	}
+	p.eventer.observer = p.observer
 	p.eventer.modifyable = true
 
 	if settings.WaitCloseMode == WaitOnPipelineClose && settings.WaitClose > 0 {
@@ -185,9 +189,7 @@ func New(
 	}
 	p.eventSema = newSema(p.queue.BufferConfig().Events)
 
-	p.observer.init(metrics)
-
-	p.output = newOutputController(log, &p.observer, p.queue)
+	p.output = newOutputController(log, p.observer, p.queue)
 	p.output.Set(out)
 
 	return p, nil
@@ -283,8 +285,9 @@ func (p *Pipeline) Connect() (beat.Client, error) {
 // the appropriate fields in the passed ClientConfig.
 func (p *Pipeline) ConnectWith(cfg beat.ClientConfig) (beat.Client, error) {
 	var (
-		canDrop    bool
-		eventFlags publisher.EventFlags
+		canDrop      bool
+		dropOnCancel bool
+		eventFlags   publisher.EventFlags
 	)
 
 	err := validateClientConfig(&cfg)
@@ -299,6 +302,7 @@ func (p *Pipeline) ConnectWith(cfg beat.ClientConfig) (beat.Client, error) {
 	switch cfg.PublishMode {
 	case beat.GuaranteedSend:
 		eventFlags = publisher.GuaranteedSend
+		dropOnCancel = true
 	case beat.DropIfFull:
 		canDrop = true
 	}
@@ -319,9 +323,9 @@ func (p *Pipeline) ConnectWith(cfg beat.ClientConfig) (beat.Client, error) {
 
 	acker := p.makeACKer(processors != nil, &cfg, waitClose)
 	producerCfg := queue.ProducerConfig{
-		// only cancel events from queue if acker is configured
-		// and no pipeline-wide ACK handler is registered
-		DropOnCancel: acker != nil && p.eventer.cb == nil,
+		// Cancel events from queue if acker is configured
+		// and no pipeline-wide ACK handler is registered.
+		DropOnCancel: dropOnCancel && acker != nil && p.eventer.cb == nil,
 	}
 
 	if reportEvents || cfg.Events != nil {
